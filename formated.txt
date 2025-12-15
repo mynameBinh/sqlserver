@@ -1,0 +1,176 @@
+================== Hồ sơ vay vốn: Trigger cập nhật tổng vốn vay ==================
+
+CREATE TRIGGER trg_HSVayVon_TV_Insert
+ON HOSOVAYVON_THANHVIEN
+FOR INSERT
+AS
+BEGIN
+    UPDATE HOSOVAYVON
+    SET TongSoVonVay = h.TongSoVonVay + hs_tv_ins.TongVon
+    FROM HOSOVAYVON h
+    JOIN (
+        SELECT MaHoso, SUM(SoVonVay) AS TongVon
+        FROM inserted
+        GROUP BY MaHoso
+    ) hs_tv_ins ON hs_tv_ins.MaHoso = h.MaHoSo
+END;
+
+
+
+
+
+================== Bổ sung dữ liệu cho bảng thành viên: Stored Procedure ==================
+
+CREATE PROCEDURE proc_ThanhVien_Insert
+    @MaThanhVien NVARCHAR(10),
+    @HoDem NVARCHAR(50),
+    @Ten NVARCHAR(20),
+    @NgaySinh DATE,
+    @GioiTinh BIT,
+    @NoiSinh NVARCHAR(50),
+    @KetQuaBoSung NVARCHAR(255) OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET @KetQuaBoSung = '';
+
+    -- Kiểm tra trùng mã thành viên
+    IF EXISTS (SELECT 1 FROM THANHVIEN WHERE MaThanhVien = @MaThanhVien)
+    BEGIN
+        SET @KetQuaBoSung = N'Lỗi: Mã thành viên đã tồn tại.';
+        RETURN;
+    END
+
+    -- Kiểm tra giới tính hợp lệ
+    IF @GioiTinh NOT IN (0, 1)
+    BEGIN
+        SET @KetQuaBoSung = N'Lỗi: Giới tính không hợp lệ (0: Nữ, 1: Nam).';
+        RETURN;
+    END
+
+    -- Thực hiện chèn dữ liệu
+    BEGIN TRY
+        INSERT INTO THANHVIEN (MaThanhVien, HoDem, Ten, NgaySinh, GioiTinh, NoiSinh)
+        VALUES (@MaThanhVien, @HoDem, @Ten, @NgaySinh, @GioiTinh, @NoiSinh);
+        SET @KetQuaBoSung = ''; -- Thành công
+    END TRY
+    BEGIN CATCH
+        SET @KetQuaBoSung = N'Lỗi hệ thống: ' + ERROR_MESSAGE();
+    END CATCH
+END;
+
+
+
+
+
+================== Hiển thị danh sách thành viên theo nơi sinh và giới tính ==================
+
+CREATE PROCEDURE proc_ThanhVien_NoiSinh
+    @NoiSinh NVARCHAR(50),
+    @GioiTinh BIT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT 
+        MaThanhVien,
+        HoDem + ' ' + Ten AS HoTen,
+        NgaySinh,
+        CASE GioiTinh 
+            WHEN 1 THEN 'Nam' 
+            ELSE 'Nữ' 
+        END AS GioiTinh,
+        NoiSinh
+    FROM THANHVIEN
+    WHERE 
+        NoiSinh LIKE @NoiSinh + '%'
+        AND GioiTinh = @GioiTinh
+    ORDER BY MaThanhVien;
+END;
+
+
+
+
+
+================== Tìm kiếm thành viên vay vốn theo nơi sinh và số vốn vay ==================
+
+CREATE PROCEDURE proc_HoSo_TimKiem
+    @NoiSinh NVARCHAR(250) = N'',
+    @SoVonVay BIGINT,
+    @SoLuong INT OUTPUT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Tìm kiếm theo điều kiện
+    SELECT DISTINCT
+        tv.MaThanhVien,
+        tv.HoDem + ' ' + tv.Ten AS HoTen,
+        tv.NoiSinh,
+        hsv.SoVonVay
+    FROM THANHVIEN tv
+    INNER JOIN HOSOVAYVON_THANHVIEN hsv ON tv.MaThanhVien = hsv.MaThanhVien
+    WHERE 
+        hsv.SoVonVay >= @SoVonVay
+        AND (
+            @NoiSinh = '' 
+            OR tv.NoiSinh LIKE '%' + @NoiSinh + '%'
+            OR NOT EXISTS (
+                SELECT 1 
+                FROM THANHVIEN tv2 
+                INNER JOIN HOSOVAYVON_THANHVIEN hsv2 ON tv2.MaThanhVien = hsv2.MaThanhVien
+                WHERE tv2.NoiSinh LIKE '%' + @NoiSinh + '%'
+            )
+        )
+    ORDER BY hsv.SoVonVay DESC;
+
+    -- Đếm số lượng thành viên thỏa điều kiện
+    SELECT @SoLuong = COUNT(DISTINCT tv.MaThanhVien)
+    FROM THANHVIEN tv
+    INNER JOIN HOSOVAYVON_THANHVIEN hsv ON tv.MaThanhVien = hsv.MaThanhVien
+    WHERE 
+        hsv.SoVonVay >= @SoVonVay
+        AND (
+            @NoiSinh = '' 
+            OR tv.NoiSinh LIKE '%' + @NoiSinh + '%'
+            OR NOT EXISTS (
+                SELECT 1 
+                FROM THANHVIEN tv2 
+                INNER JOIN HOSOVAYVON_THANHVIEN hsv2 ON tv2.MaThanhVien = hsv2.MaThanhVien
+                WHERE tv2.NoiSinh LIKE '%' + @NoiSinh + '%'
+            )
+        );
+END;
+
+
+
+
+
+================== Thống kê thành viên vay vốn theo nơi sinh và tháng sinh ==================
+
+CREATE PROCEDURE proc_ThongKeThanhVien
+    @NoiSinh NVARCHAR(250),
+    @TuThang INT,
+    @DenThang INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Tạo bảng tạm chứa tất cả các tháng trong khoảng
+    WITH ThangList AS (
+        SELECT @TuThang AS Thang
+        UNION ALL
+        SELECT Thang + 1
+        FROM ThangList
+        WHERE Thang < @DenThang
+    )
+    SELECT 
+        tl.Thang AS ThangSinh,
+        ISNULL(COUNT(DISTINCT tv.MaThanhVien), 0) AS SoLuongThanhVien
+    FROM ThangList tl
+    LEFT JOIN THANHVIEN tv ON MONTH(tv.NgaySinh) = tl.Thang 
+        AND tv.NoiSinh = @NoiSinh
+        AND tv.MaThanhVien IN (SELECT DISTINCT MaThanhVien FROM HOSOVAYVON_THANHVIEN)
+    GROUP BY tl.Thang
+    ORDER BY tl.Thang;
+END;
